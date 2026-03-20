@@ -197,12 +197,13 @@ function App() {
       avatar: member.avatar, chore: chore.name, icon: chore.icon,
       points: chore.points, ts: Date.now(),
     };
-    const newPts = (data.weeklyPoints?.[selectedMember] || 0) + chore.points;
+    const newPts = Math.max(0, (data.weeklyPoints?.[selectedMember] || 0) + chore.points);
     update(ref(db, "yoshino-point"), {
       ["weeklyPoints/" + selectedMember]: newPts,
       ["history/" + entryId]: entry,
     });
-    showToast(chore.icon + " " + chore.name + " +" + chore.points + "pt！", member.color);
+    const sign = chore.points > 0 ? "+" : "";
+    showToast(chore.icon + " " + chore.name + " " + sign + chore.points + "pt！", chore.points >= 0 ? member.color : "#FF5A7A");
   }
 
   function deleteEntry(entry) {
@@ -382,6 +383,42 @@ function App() {
               )
             )
           )
+        ),
+
+        // その他・ペナルティ
+        React.createElement("div", { style: { marginTop: 16 } },
+          React.createElement("div", { style: { fontSize: 12, color: "#aaa", marginBottom: 8, fontWeight: 600 } }, "その他 / ペナルティ"),
+          React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10 } },
+            [
+              { id: "other5",    name: "その他",     icon: "⭐", points: 5  },
+              { id: "other10",   name: "その他",     icon: "⭐", points: 10 },
+              { id: "penalty5",  name: "ペナルティ", icon: "💀", points: -5  },
+              { id: "penalty10", name: "ペナルティ", icon: "💀", points: -10 },
+            ].map(item =>
+              React.createElement("button", {
+                key: item.id, onClick: () => addPoints(item),
+                style: {
+                  border: "2px solid", borderRadius: 16, padding: "14px 12px",
+                  borderColor: item.points > 0 ? "#50C87844" : "#FF5A7A44",
+                  background: item.points > 0 ? "#50C87808" : "#FF5A7A08",
+                  boxShadow: "0 2px 10px rgba(0,0,0,0.04)",
+                  cursor: "pointer", textAlign: "left", transition: "all 0.15s",
+                  display: "flex", alignItems: "center", gap: 10,
+                },
+                onMouseEnter: e => e.currentTarget.style.transform = "scale(1.03)",
+                onMouseLeave: e => e.currentTarget.style.transform = "scale(1)",
+              },
+                React.createElement("span", { style: { fontSize: 26 } }, item.icon),
+                React.createElement("div", null,
+                  React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#333" } }, item.name),
+                  React.createElement("div", { style: {
+                    fontSize: 12, fontWeight: 700,
+                    color: item.points > 0 ? "#50C878" : "#FF5A7A"
+                  } }, (item.points > 0 ? "+" : "") + item.points + "pt")
+                )
+              )
+            )
+          )
         )
       ),
 
@@ -467,7 +504,7 @@ function App() {
                   React.createElement("div", { style: { fontSize: 14, fontWeight: 700, color: "#333" } }, h.avatar + " " + h.member + " — " + h.chore),
                   React.createElement("div", { style: { fontSize: 11, color: "#bbb", marginTop: 2 } }, formatDateTime(h.ts))
                 ),
-                React.createElement("div", { style: { fontWeight: 900, color: "#FF6B9D", fontSize: 14, marginRight: 6 } }, "+" + h.points + "pt"),
+                React.createElement("div", { style: { fontWeight: 900, color: h.points >= 0 ? "#FF6B9D" : "#FF5A7A", fontSize: 14, marginRight: 6 } }, (h.points > 0 ? "+" : "") + h.points + "pt"),
                 React.createElement("button", {
                   onClick: () => setConfirmDelete(h),
                   style: { border: "none", background: "#FFF0F0", borderRadius: 10, width: 34, height: 34, fontSize: 15, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 },
