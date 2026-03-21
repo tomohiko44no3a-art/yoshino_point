@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+!DOCTYPE html>
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
@@ -48,6 +48,7 @@ const db = getDatabase(firebaseApp);
 
 const { useState, useEffect, useRef } = React;
 
+// ─── 定数 ───────────────────────────────────────────
 const CHORES = [
   { id: 1,  name: "料理",               icon: "🍳", points: 30 },
   { id: 2,  name: "食事の準備",         icon: "🥢", points: 5  },
@@ -87,6 +88,126 @@ const RANKS = [
   { min: 250, label: "家族のヒーロー",   emoji: "👑" },
 ];
 
+// ─── チャンスロジック定義 ────────────────────────────
+// タイプA: 時間帯スロット型（朝/昼/夜）
+// タイプB: インターバル型（前回実施からX時間）
+// タイプC: 特殊ルール型
+// タイプD: 人別管理
+
+const CHANCE_RULES = {
+  // タイプA: 時間帯スロット
+  1:  { type: "slot", slots: ["morning", "noon", "evening"] }, // 料理
+  2:  { type: "slot", slots: ["morning", "noon", "evening"] }, // 食事の準備
+  3:  { type: "slot", slots: ["morning", "noon", "evening"] }, // 皿洗い
+  4:  { type: "slot", slots: ["morning", "noon", "evening"] }, // 食器を戻す
+  7:  { type: "slot", slots: ["morning", "noon", "evening"] }, // テーブル拭き
+  8:  { type: "slot", slots: ["morning"] },                    // シャッターを開ける
+  9:  { type: "slot", slots: ["evening"] },                    // シャッターを閉める
+
+  // タイプB: インターバル型
+  10: { type: "interval", hours: 12  }, // 掃除機をかける
+  11: { type: "interval", hours: 12  }, // 洗濯を回す
+  16: { type: "interval", hours: 12  }, // 洗面所の掃除
+  17: { type: "interval", hours: 8   }, // 靴をしまう
+  5:  { type: "interval", hours: 24  }, // お茶をつくる
+  15: { type: "interval", hours: 72  }, // トイレ掃除
+  18: { type: "interval", hours: 72  }, // 玄関掃除
+  19: { type: "interval", hours: 48  }, // お風呂掃除
+
+  // タイプC: 特殊ルール
+  20: { type: "daily6am" },             // 階段の掃除機（毎日6時以降1回）
+  6:  { type: "daily6am" },             // ゴミ捨て&袋交換（毎日6時以降1回）
+  12: { type: "after", afterId: 11 },   // 洗濯を干す（洗濯を回すの後）
+  13: { type: "after", afterId: 11 },   // 洗濯を畳む（洗濯を回すの後）
+
+  // タイプD: 人別管理
+  14: { type: "perMember" },            // 部屋の掃除
+};
+
+// 時間帯判定
+function getTimeSlot(date) {
+  const h = date.getHours();
+  if (h >= 5  && h < 11) return "morning";
+  if (h >= 11 && h < 17) return "noon";
+  return "evening"; // 17〜翌5時
+}
+
+// 今日の6時のタイムスタンプ
+function getToday6am() {
+  const now = new Date();
+  const d = new Date(now);
+  d.setHours(6, 0, 0, 0);
+  // 現在が6時より前なら昨日の6時
+  if (now.getHours() < 6) d.setDate(d.getDate() - 1);
+  return d.getTime();
+}
+
+// チャンスがあるか判定
+function isChance(choreId, historyArr, selectedMemberId, now) {
+  const rule = CHANCE_RULES[choreId];
+  if (!rule) return false;
+
+  const chore = CHORES.find(c => c.id === choreId);
+  if (!chore) return false;
+
+  // タイプA: スロット型
+  if (rule.type === "slot") {
+    const currentSlot = getTimeSlot(now);
+    if (!rule.slots.includes(currentSlot)) return false;
+    // 今の時間帯に誰かがやったか
+    const slotStart = new Date(now);
+    if (currentSlot === "morning") { slotStart.setHours(5, 0, 0, 0); }
+    else if (currentSlot === "noon") { slotStart.setHours(11, 0, 0, 0); }
+    else { 
+      // eveningは17時〜翌5時をまたぐ
+      if (now.getHours() < 5) { slotStart.setDate(slotStart.getDate() - 1); }
+      slotStart.setHours(17, 0, 0, 0);
+    }
+    const done = historyArr.some(h => h.choreId === choreId && h.ts >= slotStart.getTime());
+    return !done;
+  }
+
+  // タイプB: インターバル型
+  if (rule.type === "interval") {
+    const last = historyArr.filter(h => h.choreId === choreId).sort((a, b) => b.ts - a.ts)[0];
+    if (!last) return true;
+    return (now.getTime() - last.ts) >= rule.hours * 3600000;
+  }
+
+  // タイプC: 毎日6時以降1回
+  if (rule.type === "daily6am") {
+    const d6am = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 6, 0, 0, 0);
+    if (now.getHours() < 6) d6am.setDate(d6am.getDate() - 1);
+    const today6am = d6am.getTime();
+    if (now.getTime() < today6am) return false;
+    const done = historyArr.some(h => h.choreId === choreId && h.ts >= today6am);
+    return !done;
+  }
+
+  // タイプC: 特定家事の後
+  if (rule.type === "after") {
+    const triggerHistory = historyArr.filter(h => h.choreId === rule.afterId).sort((a, b) => b.ts - a.ts);
+    if (triggerHistory.length === 0) return false;
+    const lastTrigger = triggerHistory[0];
+    // トリガー後にこの家事をやっていないか
+    const done = historyArr.some(h => h.choreId === choreId && h.ts > lastTrigger.ts);
+    return !done;
+  }
+
+  // タイプD: 人別管理
+  if (rule.type === "perMember") {
+    const d6am = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 6, 0, 0, 0);
+    if (now.getHours() < 6) d6am.setDate(d6am.getDate() - 1);
+    const today6am = d6am.getTime();
+    if (now.getTime() < today6am) return false;
+    const done = historyArr.some(h => h.choreId === choreId && h.memberId === selectedMemberId && h.ts >= today6am);
+    return !done;
+  }
+
+  return false;
+}
+
+// ─── ユーティリティ ──────────────────────────────────
 function getRank(pts) {
   for (let i = RANKS.length - 1; i >= 0; i--) {
     if (pts >= RANKS[i].min) return RANKS[i];
@@ -118,30 +239,35 @@ function formatDateTime(ts) {
     DAY_NAMES[d.getDay()] + "） " + d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
 }
 
+// ─── App ─────────────────────────────────────────────
 function App() {
   const now = new Date();
   const thisWeekStart = getWeekStart(now).getTime();
 
-  const [data, setData] = useState(null); // Firebase data
+  const [data, setData] = useState(null);
   const [selectedMember, setSelectedMember] = useState(MEMBERS[0].id);
   const [toast, setToast] = useState(null);
   const [tab, setTab] = useState("home");
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [tick, setTick] = useState(0); // 1分ごとに再計算
   const toastTimer = useRef(null);
 
-  // Subscribe to Firebase
+  // 1分ごとにチャンス再評価
+  useEffect(() => {
+    const timer = setInterval(() => setTick(t => t + 1), 1800000);
+    return () => clearInterval(timer);
+  }, []);
+
   useEffect(() => {
     const dbRef = ref(db, "yoshino-point");
     const unsub = onValue(dbRef, snapshot => {
       const val = snapshot.val();
       if (val) {
         setData(val);
-        // Check week rollover
         if (val.currentWeekStart && thisWeekStart > val.currentWeekStart) {
           doWeekRollover(val);
         }
       } else {
-        // Initialize empty data
         const init = {
           currentWeekStart: thisWeekStart,
           weeklyPoints: Object.fromEntries(MEMBERS.map(m => [m.id, 0])),
@@ -160,20 +286,14 @@ function App() {
       .sort((a, b) => (wp[b.id] || 0) - (wp[a.id] || 0))
       .slice(0, 3)
       .map(m => ({ name: m.name, avatar: m.avatar, color: m.color, points: wp[m.id] || 0 }));
-
-    const pastWeeks = val.pastWeeks ? Object.values(val.pastWeeks) : [];
     const newPastKey = "week_" + val.currentWeekStart;
-    const newPastEntry = {
+    const newPastWeeks = { ...(val.pastWeeks || {}), [newPastKey]: {
       weekStartTs: val.currentWeekStart,
       weekLabel: formatWeekRange(val.currentWeekStart),
       top3,
-    };
-
-    const newPastWeeks = { ...(val.pastWeeks || {}), [newPastKey]: newPastEntry };
-    // Keep only last 10
+    }};
     const keys = Object.keys(newPastWeeks).sort().reverse().slice(0, 10);
     const trimmed = Object.fromEntries(keys.map(k => [k, newPastWeeks[k]]));
-
     update(ref(db, "yoshino-point"), {
       currentWeekStart: thisWeekStart,
       weeklyPoints: Object.fromEntries(MEMBERS.map(m => [m.id, 0])),
@@ -194,8 +314,8 @@ function App() {
     const entryId = "e_" + Date.now();
     const entry = {
       id: entryId, memberId: member.id, member: member.name,
-      avatar: member.avatar, chore: chore.name, icon: chore.icon,
-      points: chore.points, ts: Date.now(),
+      avatar: member.avatar, chore: chore.name, choreId: chore.id || null,
+      icon: chore.icon, points: chore.points, ts: Date.now(),
     };
     const newPts = Math.max(0, (data.weeklyPoints?.[selectedMember] || 0) + chore.points);
     update(ref(db, "yoshino-point"), {
@@ -223,24 +343,24 @@ function App() {
   );
 
   const wp = data.weeklyPoints || {};
-  const historyArr = data.history
-    ? Object.values(data.history).sort((a, b) => b.ts - a.ts)
-    : [];
-  const pastWeeksArr = data.pastWeeks
-    ? Object.values(data.pastWeeks).sort((a, b) => b.weekStartTs - a.weekStartTs)
-    : [];
+  const historyArr = data.history ? Object.values(data.history).sort((a, b) => b.ts - a.ts) : [];
+  const pastWeeksArr = data.pastWeeks ? Object.values(data.pastWeeks).sort((a, b) => b.weekStartTs - a.weekStartTs) : [];
   const lastWeek = pastWeeksArr[0] || null;
-
   const sorted = [...MEMBERS].sort((a, b) => (wp[b.id] || 0) - (wp[a.id] || 0));
   const currentMember = MEMBERS.find(m => m.id === selectedMember);
   const myWeeklyPts = wp[selectedMember] || 0;
   const rank = getRank(myWeeklyPts);
   const nextRank = RANKS.find(r => r.min > myWeeklyPts);
-  const pctToNext = nextRank
-    ? Math.min(100, ((myWeeklyPts - rank.min) / (nextRank.min - rank.min)) * 100)
-    : 100;
+  const pctToNext = nextRank ? Math.min(100, ((myWeeklyPts - rank.min) / (nextRank.min - rank.min)) * 100) : 100;
   const medalEmoji = i => i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : (i + 1) + "";
   const currentWeekStart = data.currentWeekStart || thisWeekStart;
+
+  // チャンス判定（現在時刻基準）
+  const nowDate = new Date();
+  const chanceMap = {};
+  CHORES.forEach(c => {
+    chanceMap[c.id] = isChance(c.id, historyArr, selectedMember, nowDate);
+  });
 
   return React.createElement("div", { style: { minHeight: "100vh" } },
 
@@ -293,8 +413,7 @@ function App() {
     React.createElement("div", { style: { display: "flex", margin: "16px 16px 0", background: "#fff", borderRadius: 16, padding: 4, boxShadow: "0 2px 12px rgba(0,0,0,0.06)" } },
       [["home", "🏡 記録"], ["rank", "🏆 ランキング"], ["history", "📋 履歴"]].map(([key, label]) =>
         React.createElement("button", {
-          key,
-          onClick: () => setTab(key),
+          key, onClick: () => setTab(key),
           style: {
             flex: 1, border: "none", borderRadius: 12, padding: "8px 0", fontSize: 13, fontWeight: 700,
             cursor: "pointer", transition: "all 0.2s",
@@ -310,6 +429,8 @@ function App() {
 
       // HOME TAB
       tab === "home" && React.createElement(React.Fragment, null,
+
+        // Member selector
         React.createElement("div", { style: { marginBottom: 16 } },
           React.createElement("div", { style: { fontSize: 12, color: "#aaa", marginBottom: 8, fontWeight: 600 } }, "だれがやった？"),
           React.createElement("div", { style: { display: "flex", gap: 8 } },
@@ -329,6 +450,7 @@ function App() {
           )
         ),
 
+        // Status card
         React.createElement("div", {
           style: {
             background: "linear-gradient(135deg, " + currentMember.color + "22, " + currentMember.color + "11)",
@@ -362,14 +484,18 @@ function App() {
           )
         ),
 
+        // Chore grid
         React.createElement("div", { style: { fontSize: 12, color: "#aaa", marginBottom: 8, fontWeight: 600 } }, "なにをした？タップ！"),
         React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10 } },
-          CHORES.map(chore =>
-            React.createElement("button", {
+          CHORES.map(chore => {
+            const chance = chanceMap[chore.id];
+            return React.createElement("button", {
               key: chore.id, onClick: () => addPoints(chore),
               style: {
-                border: "none", borderRadius: 16, padding: "14px 12px",
-                background: "#fff", boxShadow: "0 2px 10px rgba(0,0,0,0.06)",
+                border: chance ? "2px solid #FFAAAA" : "2px solid transparent",
+                borderRadius: 16, padding: "14px 12px",
+                background: "#fff",
+                boxShadow: chance ? "0 2px 10px rgba(255,100,100,0.12)" : "0 2px 10px rgba(0,0,0,0.06)",
                 cursor: "pointer", textAlign: "left", transition: "all 0.15s",
                 display: "flex", alignItems: "center", gap: 10,
               },
@@ -381,8 +507,8 @@ function App() {
                 React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#333" } }, chore.name),
                 React.createElement("div", { style: { fontSize: 12, color: "#FF6B9D", fontWeight: 700 } }, "+" + chore.points + "pt")
               )
-            )
-          )
+            );
+          })
         ),
 
         // その他・ペナルティ
@@ -401,7 +527,6 @@ function App() {
                   border: "2px solid", borderRadius: 16, padding: "14px 12px",
                   borderColor: item.points > 0 ? "#50C87844" : "#FF5A7A44",
                   background: item.points > 0 ? "#50C87808" : "#FF5A7A08",
-                  boxShadow: "0 2px 10px rgba(0,0,0,0.04)",
                   cursor: "pointer", textAlign: "left", transition: "all 0.15s",
                   display: "flex", alignItems: "center", gap: 10,
                 },
@@ -411,10 +536,9 @@ function App() {
                 React.createElement("span", { style: { fontSize: 26 } }, item.icon),
                 React.createElement("div", null,
                   React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#333" } }, item.name),
-                  React.createElement("div", { style: {
-                    fontSize: 12, fontWeight: 700,
-                    color: item.points > 0 ? "#50C878" : "#FF5A7A"
-                  } }, (item.points > 0 ? "+" : "") + item.points + "pt")
+                  React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: item.points > 0 ? "#50C878" : "#FF5A7A" } },
+                    (item.points > 0 ? "+" : "") + item.points + "pt"
+                  )
                 )
               )
             )
@@ -451,7 +575,6 @@ function App() {
             )
           )
         ),
-
         React.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: 8, marginBottom: 12 } },
           React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#555" } }, "今週のランキング"),
           React.createElement("div", { style: { fontSize: 11, color: "#bbb" } }, formatWeekRange(currentWeekStart))
@@ -504,7 +627,9 @@ function App() {
                   React.createElement("div", { style: { fontSize: 14, fontWeight: 700, color: "#333" } }, h.avatar + " " + h.member + " — " + h.chore),
                   React.createElement("div", { style: { fontSize: 11, color: "#bbb", marginTop: 2 } }, formatDateTime(h.ts))
                 ),
-                React.createElement("div", { style: { fontWeight: 900, color: h.points >= 0 ? "#FF6B9D" : "#FF5A7A", fontSize: 14, marginRight: 6 } }, (h.points > 0 ? "+" : "") + h.points + "pt"),
+                React.createElement("div", { style: { fontWeight: 900, color: h.points >= 0 ? "#FF6B9D" : "#FF5A7A", fontSize: 14, marginRight: 6 } },
+                  (h.points > 0 ? "+" : "") + h.points + "pt"
+                ),
                 React.createElement("button", {
                   onClick: () => setConfirmDelete(h),
                   style: { border: "none", background: "#FFF0F0", borderRadius: 10, width: 34, height: 34, fontSize: 15, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 },
