@@ -363,11 +363,11 @@ function App() {
         .filter(c => isChance(c.id, histArr, memberId, nowDate) && c.id !== 14)
         .map(c => c.name);
 
-      // 今週やった家事（最新2件・重複なし・部屋の掃除は除外して別途処理）
+      // 今週やった家事（選択中メンバーの最新2件・重複なし・部屋の掃除は除外して別途処理）
       const doneChores = [];
       const seen = new Set();
       for (const h of histArr) {
-        if (h.points > 0 && h.chore && !seen.has(h.chore) && h.chore !== "部屋の掃除") {
+        if (h.points > 0 && h.chore && h.memberId === memberId && !seen.has(h.chore) && h.chore !== "部屋の掃除") {
           seen.add(h.chore);
           doneChores.push(h.chore);
           if (doneChores.length >= 2) break;
