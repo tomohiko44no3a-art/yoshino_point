@@ -78,6 +78,7 @@ const CHORES = [
   { id: 14, name: "部屋の掃除",         icon: "🏠", points: 20 },
   { id: 15, name: "トイレ掃除",         icon: "🚽", points: 35 },
   { id: 16, name: "洗面所の掃除",       icon: "🪥", points: 15 },
+  { id: 21, name: "排水溝の掃除",       icon: "🕳️", points: 20 },
   { id: 17, name: "靴をしまう",         icon: "👟", points: 5  },
   { id: 18, name: "玄関掃除",           icon: "🚪", points: 10 },
   { id: 19, name: "お風呂掃除",         icon: "🛁", points: 20 },
@@ -130,6 +131,7 @@ const CHANCE_RULES = {
   10: { type: "interval", hours: 12  }, // 掃除機をかける
   11: { type: "interval", hours: 12  }, // 洗濯を回す
   16: { type: "interval", hours: 12  }, // 洗面所の掃除
+  21: { type: "daily6am" },             // 排水溝の掃除（毎日6時以降1回）
   17: { type: "interval", hours: 8   }, // 靴をしまう
   5:  { type: "interval", hours: 24  }, // お茶をつくる
   15: { type: "interval", hours: 72  }, // トイレ掃除
@@ -348,70 +350,117 @@ function App() {
   }
 
 
-  // RUMI AIのコメント生成
-  async function generateRumiComment(memberId, memberName, pts, histArr, nowDate) {
-    if (memberId === "mama") return; // ママはスキップ
+  // RUMI AIコメント（固定パターン版）
+  function generateRumiComment(memberId, memberName, pts, histArr, nowDate) {
+    if (memberId === "mama") return;
     setRumiLoading(true);
     setRumiComment(null);
 
-    // チャンス計算
-    const chances = CHORES
-      .filter(c => isChance(c.id, histArr, memberId, nowDate))
-      .map(c => c.name);
+    setTimeout(() => {
+      const isKid = ["son", "daughter1", "daughter2"].includes(memberId);
+      const roomChance = isChance(14, histArr, memberId, nowDate);
+      const chances = CHORES
+        .filter(c => isChance(c.id, histArr, memberId, nowDate) && c.id !== 14)
+        .map(c => c.name);
 
-    const isKid = ["son", "daughter1", "daughter2"].includes(memberId);
-    const roomChance = isKid && isChance(14, histArr, memberId, nowDate);
-
-    // アドバイス対象
-    let adviceChores = [];
-    if (isKid) {
-      if (roomChance) {
-        adviceChores = ["部屋の掃除"];
-      } else {
-        adviceChores = chances.filter(n => n !== "部屋の掃除").slice(0, 2);
+      // 今週やった家事（最新2件・重複なし・部屋の掃除は除外して別途処理）
+      const doneChores = [];
+      const seen = new Set();
+      for (const h of histArr) {
+        if (h.points > 0 && h.chore && !seen.has(h.chore) && h.chore !== "部屋の掃除") {
+          seen.add(h.chore);
+          doneChores.push(h.chore);
+          if (doneChores.length >= 2) break;
+        }
       }
-    } else {
-      adviceChores = chances.slice(0, 2);
-    }
 
-    // 今週やった家事リスト
-    const doneChores = [...new Set(histArr.map(h => h.chore))].slice(0, 5);
-    const rank = getRank(pts);
+      // ①褒めフレーズ
+      const praiseList = pts === 0
+        ? ["今週はまだ動けてないみたい。", "今週はまだ0ptだよ。"]
+        : pts < 150
+        ? ["少しずつ頑張ってくれてるね。", "ちょっとずつ動いてくれてるね。"]
+        : pts < 500
+        ? ["今週もよく動いてくれてるね、ありがとう。", "今週もしっかり頑張ってくれてるね。"]
+        : pts < 1000
+        ? ["今週は本当によく頑張ってくれてる！", "今週はすごく動いてくれてるね！"]
+        : ["今週は大活躍だね、本当に助かってる！", "今週は神がかってるよ！本当にありがとう！"];
+      const praise = praiseList[Math.floor(Math.random() * praiseList.length)];
 
-    const prompt = `あなたは家族の家事サポートAI「RUMI」です。温かいお母さん風のトーンで、感謝と励ましを込めて短いコメントをしてください。
+      // ②感謝フレーズ
+      let thanks = "";
+      if (doneChores.length > 0) {
+        const thanksList = [
+          `${doneChores[0]}をやってくれてありがとう。`,
+          `${doneChores[0]}をしてくれて助かったよ。`,
+          `${doneChores[0]}をやってくれたんだね、ありがとう。`,
+        ];
+        thanks = thanksList[Math.floor(Math.random() * thanksList.length)];
+        if (doneChores.length > 1) {
+          thanks += `${doneChores[1]}も助かったよ。`;
+        }
+      }
 
-メンバー: ${memberName}
-今週のポイント: ${pts}pt
-ランク: ${rank.label}
-今週やった家事: ${doneChores.length > 0 ? doneChores.join('、') : 'まだなし'}
-今やってほしい家事: ${adviceChores.length > 0 ? adviceChores.join('、') : 'なし'}
+      // ③チャンスフレーズ
+      let advice = "";
+      const otherChance = chances[0] || null;
 
-ルール:
-- 必ず「${memberName}」と呼びかけて始める
-- 今週の頑張りへの感謝（やった家事が0なら優しく喝）
-- 「今やってほしい家事」がある場合は自然にアドバイス（1〜2個まで）
-- 最後に一言励ます
-- 全体で80〜120文字程度
-- 敬語なし、お母さんが子供や家族に話しかけるような口調
-- 絵文字は文末に1個だけ`;
+      if (isKid) {
+        if (roomChance) {
+          // 部屋の掃除チャンスあり → 叱る
+          const scoldList = [
+            "でも、部屋、汚くなってない？そろそろ掃除してよ！",
+            "でも、今日はまだ部屋の掃除してないじゃない！",
+            "でも、部屋の掃除、忘れてない？ちゃんとやってよ！",
+          ];
+          advice = scoldList[Math.floor(Math.random() * scoldList.length)];
+          if (otherChance) {
+            advice += `${otherChance}のタイミングでもあるよ♪`;
+          }
+        } else {
+          // 部屋の掃除済み → 特別褒め＋他チャンス
+          const roomPraise = [
+            "部屋の掃除もしてくれたんだね！ありがとう♪",
+            "部屋の掃除してくれて、すごく嬉しいよ！",
+          ];
+          advice = roomPraise[Math.floor(Math.random() * roomPraise.length)];
+          if (otherChance) {
+            const adviceList = [
+              `${otherChance}のタイミングだよ！`,
+              `${otherChance}もやってくれると嬉しいな♪`,
+            ];
+            advice += adviceList[Math.floor(Math.random() * adviceList.length)];
+          }
+        }
+      } else {
+        // パパ
+        if (chances.length === 0) {
+          const perfectList = [
+            "今日はもうバッチリだね！",
+            "今日はやることやってくれてるね！",
+          ];
+          advice = perfectList[Math.floor(Math.random() * perfectList.length)];
+        } else if (chances.length >= 3) {
+          const busyList = [
+            "今日はやれることがたくさんあるよ！",
+            "まだチャンスがいくつかあるよ！",
+          ];
+          advice = busyList[Math.floor(Math.random() * busyList.length)];
+        } else {
+          const adviceList = [
+            `${chances[0]}のタイミングだよ♪`,
+            `${chances[0]}をやってくれると嬉しいな♪`,
+          ];
+          advice = adviceList[Math.floor(Math.random() * adviceList.length)];
+        }
+      }
 
-    try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 200,
-          messages: [{ role: "user", content: prompt }]
-        })
-      });
-      const data = await res.json();
-      const text = data.content?.[0]?.text || "コメントを取得できませんでした";
-      setRumiComment(text);
-    } catch(e) {
-      setRumiComment("今週もありがとう。引き続きよろしくね！");
-    }
-    setRumiLoading(false);
+      // コメント組み立て
+      const parts = [memberName + "、" + praise];
+      if (thanks) parts.push(thanks);
+      if (advice) parts.push(advice);
+      setRumiComment(parts.join(" "));
+      setRumiLoading(false);
+    }, 800); // 少し間を置いてローディング演出
   }
 
   function addPoints(chore) {
@@ -430,6 +479,16 @@ function App() {
     });
     const sign = chore.points > 0 ? "+" : "";
     showToast(chore.icon + " " + chore.name + " " + sign + chore.points + "pt！", chore.points >= 0 ? member.color : "#FF5A7A");
+
+    // パパが料理を記録したら特別メッセージ（2連続トースト）
+    if (member.id === "papa" && chore.id === 1) {
+      setTimeout(() => {
+        showToast("🍳 料理してくれてありがとう！", "#E87BAA");
+      }, 2500);
+      setTimeout(() => {
+        showToast("🍽️ できればキッチンの掃除と皿洗いまでやってくれると嬉しいな♪", "#E87BAA");
+      }, 5200);
+    }
   }
 
   function deleteEntry(entry) {
@@ -565,6 +624,10 @@ function App() {
                 ? RUMI_IMGS["smile"]
                 : rumiLoading ? RUMI_IMGS["neutral"]
                 : rumiComment === null ? RUMI_IMGS["neutral"]
+                // 子供で部屋の掃除チャンスあり → 😡優先
+                : (["son","daughter1","daughter2"].includes(selectedMember) && isChance(14, historyArr, selectedMember, new Date()))
+                  ? RUMI_IMGS["angry"]
+                // ポイントで表情決定
                 : (wp[selectedMember] || 0) >= 1000 ? RUMI_IMGS["love"]
                 : (wp[selectedMember] || 0) >= 500  ? RUMI_IMGS["happy"]
                 : (wp[selectedMember] || 0) >= 150  ? RUMI_IMGS["smile"]
